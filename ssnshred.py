@@ -66,6 +66,107 @@ def build_search_terms(numbers: list[str], auto: bool) -> list[str]:
 
 # ── PDF redaction ───────────────────────────────────────────────────────────
 
+def _replace_all(text: str, terms: list[str], replacement: str = "REDACTED") -> tuple[str, int]:
+    """Replace all occurrences of any term in text. Returns (new_text, count)."""
+    count = 0
+    for term in terms:
+        n = text.count(term)
+        if n:
+            text = text.replace(term, replacement)
+            count += n
+    return text, count
+
+
+def _scrub_metadata(doc, terms: list[str], auto: bool, dry_run: bool) -> int:
+    """Remove SSNs from the PDF metadata dictionary and XMP XML."""
+    total = 0
+    meta = doc.metadata
+    dirty = False
+    for key in ("title", "author", "subject", "keywords", "creator", "producer"):
+        val = meta.get(key, "") or ""
+        new_val, n = _replace_all(val, terms)
+        if auto:
+            new_val, n2 = AUTO_SSN_PATTERN.subn("REDACTED", new_val)
+            n += n2
+        if n:
+            if dry_run:
+                print(f"  Metadata[{key}]: found {n} match(es)")
+            meta[key] = new_val
+            dirty = True
+            total += n
+    if dirty and not dry_run:
+        doc.set_metadata(meta)
+
+    # XMP XML metadata
+    xmp = doc.xref_xml_metadata()
+    if xmp:
+        new_xmp, n = _replace_all(xmp, terms)
+        if auto:
+            new_xmp, n2 = AUTO_SSN_PATTERN.subn("REDACTED", new_xmp)
+            n += n2
+        if n:
+            if dry_run:
+                print(f"  XMP metadata: found {n} match(es)")
+            elif not dry_run:
+                doc.set_xml_metadata(new_xmp)
+            total += n
+
+    return total
+
+
+def _scrub_form_fields(doc, terms: list[str], auto: bool, dry_run: bool) -> int:
+    """Remove SSNs from AcroForm widget values and regenerate appearances."""
+    total = 0
+    for page in doc:
+        for widget in page.widgets():
+            val = widget.field_value or ""
+            new_val, n = _replace_all(val, terms)
+            if auto:
+                new_val, n2 = AUTO_SSN_PATTERN.subn("REDACTED", new_val)
+                n += n2
+            if n:
+                if dry_run:
+                    print(f"  Form field '{widget.field_name}': found {n} match(es)")
+                else:
+                    widget.field_value = new_val
+                    widget.update()
+                total += n
+    return total
+
+
+def _scrub_embedded_files(doc, terms: list[str], auto: bool, dry_run: bool) -> int:
+    """Remove SSNs from embedded file attachments."""
+    total = 0
+    # Collect scrub operations first (we'll delete+re-add, which changes indices)
+    scrubs: list[tuple[str, bytes, dict]] = []
+    for i in range(doc.embfile_count()):
+        try:
+            data = doc.embfile_get(i)
+            text = data.decode("utf-8", errors="replace")
+            new_text, n = _replace_all(text, terms)
+            if auto:
+                new_text, n2 = AUTO_SSN_PATTERN.subn("REDACTED", new_text)
+                n += n2
+            if n:
+                info = doc.embfile_info(i)
+                name = info.get("name", f"attachment-{i}")
+                if dry_run:
+                    print(f"  Embedded file '{name}': found {n} match(es)")
+                else:
+                    scrubs.append((name, new_text.encode("utf-8"), info))
+                total += n
+        except Exception:
+            pass
+    # Apply scrubs via delete + re-add (embfile_upd has a bug with raw bytes)
+    for name, new_data, info in scrubs:
+        doc.embfile_del(name)
+        doc.embfile_add(name, new_data,
+                        filename=info.get("filename", name),
+                        ufilename=info.get("ufilename", name),
+                        desc=info.get("description", ""))
+    return total
+
+
 def redact_pdf(src: Path, dest: Path, terms: list[str], auto: bool, dry_run: bool) -> int:
     try:
         import fitz  # PyMuPDF
@@ -77,6 +178,16 @@ def redact_pdf(src: Path, dest: Path, terms: list[str], auto: bool, dry_run: boo
     doc = fitz.open(src)
     total = 0
 
+    # 1. Scrub metadata (title, keywords, XMP)
+    total += _scrub_metadata(doc, terms, auto, dry_run)
+
+    # 2. Scrub form field values (AcroForms / widgets)
+    total += _scrub_form_fields(doc, terms, auto, dry_run)
+
+    # 3. Scrub embedded file attachments
+    total += _scrub_embedded_files(doc, terms, auto, dry_run)
+
+    # 4. Redact visible page content
     for page_num, page in enumerate(doc, start=1):
         page_hits = 0
 
@@ -111,8 +222,9 @@ def redact_pdf(src: Path, dest: Path, terms: list[str], auto: bool, dry_run: boo
 
         total += page_hits
 
+    # 5. Save with garbage collection to remove orphaned pre-redaction objects
     if not dry_run:
-        doc.save(dest)
+        doc.save(dest, garbage=4, deflate=True)
     doc.close()
     return total
 
@@ -186,6 +298,9 @@ def main() -> None:
         print(f"\n{count} match(es) found. No file written.")
     elif count:
         print(f"Redacted {count} match(es). Output: {dest}")
+        if is_pdf:
+            print("Scrubbed: page content, metadata, form fields, "
+                  "embedded files. Saved with garbage collection.")
     else:
         print("No matches found. No file written.")
 
