@@ -26,7 +26,7 @@ These are **not fixed** and should be noted by users:
 | **Non-UTF-8 embedded files** | Binary attachments that fail UTF-8 decoding are skipped | Manual review needed for non-text attachments |
 | **Custom font encodings** | Exotic CIDFont/ToUnicode mappings could theoretically hide text from `search_for()` | Rare in tax software; verify with `--dry-run` |
 | **JavaScript actions** | PDF JavaScript could reference SSNs in code strings | Uncommon in tax returns; PDF JS is in object streams covered by GC |
-| **Linked (not embedded) content** | External URLs or file references containing SSNs | Out of scope — the SSN lives elsewhere |
+| **Linked (not embedded) content** | External URLs or file references containing SSNs | Out of scope, as the SSN lives elsewhere |
 
 ---
 
