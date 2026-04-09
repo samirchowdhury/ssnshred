@@ -49,7 +49,7 @@ def ssn_variants(raw: str) -> list[str]:
 AUTO_SSN_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 
 
-def build_search_terms(numbers: list[str], auto: bool) -> list[str]:
+def build_search_terms(numbers: list[str]) -> list[str]:
     """Build the full list of literal strings to search for."""
     terms: list[str] = []
     for n in numbers:
@@ -142,7 +142,10 @@ def _scrub_embedded_files(doc, terms: list[str], auto: bool, dry_run: bool) -> i
     for i in range(doc.embfile_count()):
         try:
             data = doc.embfile_get(i)
-            text = data.decode("utf-8", errors="replace")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                continue  # skip binary attachments
             new_text, n = _replace_all(text, terms)
             if auto:
                 new_text, n2 = AUTO_SSN_PATTERN.subn("REDACTED", new_text)
@@ -281,7 +284,7 @@ def main() -> None:
         print("Error: provide at least one number to redact, or use --auto.", file=sys.stderr)
         sys.exit(1)
 
-    terms = build_search_terms(args.numbers, args.auto)
+    terms = build_search_terms(args.numbers)
     dest = src.with_stem(src.stem + ".redacted")
 
     is_pdf = src.suffix.lower() == ".pdf"

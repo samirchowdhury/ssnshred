@@ -1,0 +1,86 @@
+# `ssnshred` Safety Report Card
+
+This page documents the data leakage possibilities within `ssnshred.py` and their mitigations.
+
+## Summary
+
+| Area | Status | Relevant Code |
+|------|--------|-------------|
+| Page content redaction | **PASS** | `page.apply_redactions()` |
+| PDF metadata scrubbing | **PASS** | `doc.set_metadata(meta)`, `doc.set_xml_metadata(new_xmp)` |
+| Form field (AcroForm) scrubbing | **PASS** | `widget.field_value` + `widget.update()` |
+| Embedded file scrubbing | **PASS** | `doc.embfile_del()` + `doc.embfile_add()` |
+| Orphaned object cleanup | **PASS** | `doc.save(dest, garbage=4, deflate=True)` |
+| Visual rendering | **PASS** | Manual test via `page.get_pixmap()` — "REDACTED" displayed, no SSN visible |
+| Text extraction (copy/paste) | **PASS** | Manual test via `page.get_text()` — clean text after `apply_redactions()` |
+| Incremental save leakage | **PASS** | PyMuPDF writes a clean single-revision file (one `%%EOF` marker) |
+| Font/glyph/encoding leakage | **PASS** | Standard encoding; no SSN embedded in font tables |
+
+## Remaining Limitations
+
+These are **not fixed** and should be noted by users:
+
+| Limitation | Risk | Mitigation |
+|------------|------|------------|
+| **Scanned/image-based PDFs** | SSNs baked into raster images are not found by text search | Use OCR-based redaction tools for scanned documents |
+| **Non-UTF-8 embedded files** | Binary attachments that fail UTF-8 decoding are skipped | Manual review needed for non-text attachments |
+| **Custom font encodings** | Exotic CIDFont/ToUnicode mappings could theoretically hide text from `search_for()` | Rare in tax software; verify with `--dry-run` |
+| **JavaScript actions** | PDF JavaScript could reference SSNs in code strings | Uncommon in tax returns; PDF JS is in object streams covered by GC |
+| **Linked (not embedded) content** | External URLs or file references containing SSNs | Out of scope — the SSN lives elsewhere |
+
+---
+
+## Appendix: PDF Internals for Non-Experts
+
+This section explain why a PDF needs five different kinds of scrubbing.
+
+### A primer on PDFs
+
+A PDF is not a simple document like a `.txt` file.
+It's a structured bundle of many different types of objects.
+It can be thought of as a container that holds text, images, fonts, form data, metadata, and even full attached files, all wrapped together.
+
+To redact text from a PDF, we need to find and remove it from every place it might appear, not just the visible page.
+
+### Five places SSNs can hide
+
+#### 1. Page content streams (the visible text)
+
+This is what we see when we open the PDF.
+Text is stored as low-level drawing commands like "move to position (72, 130) and draw the string '078-05-1120'."
+PyMuPDF's `apply_redactions()` handles this: it finds the drawing commands, removes them, and draws "REDACTED" instead.
+
+#### 2. Metadata (document properties)
+
+Every PDF has a properties panel (try File → Properties in any PDF viewer).
+It includes fields like Title, Author, Subject, and Keywords.
+Tax software sometimes stuffs SSNs into these fields.
+For example, documents might be titled "Tax Return - John Doe SSN 078-05-1120" for internal tracking.
+This metadata is stored separately from page content and must be scrubbed independently.
+
+#### 3. Form fields (fillable forms)
+
+Many tax PDFs are interactive forms where the SSN box is a fillable text field rather than drawn text.
+Each form field stores its value in a data structure called a "widget."
+Even if we visually redact the page, the widget's stored value remains and is trivially readable.
+We must overwrite the widget value and regenerate its visual appearance.
+
+#### 4. Embedded file attachments
+
+A PDF can carry other files inside it, like email attachments.
+Tax software sometimes embeds supplementary data files, calculation worksheets, or XML tax data that may contain SSNs.
+These live in a completely separate part of the PDF structure and are invisible on any page.
+
+#### 5. Orphaned objects (garbage from editing)
+
+When a PDF is edited (including by redaction tools), the old content is unlinked but not necessarily deleted.
+The old text may still sit in the file as an "orphaned object" that no page points to anymore, but it's still there in the raw bytes.
+Anyone with a hex editor or PDF library can find and read it.
+Saving with garbage collection (level 4) removes all unreferenced objects, truly deleting the old content.
+
+### A note on security posture for PDFs
+
+PDFs were designed for rendering fidelity, i.e., making documents look the same everywhere.
+They were not designed for security.
+Most redaction tools only handle case #1 (page content) and miss the rest.
+The script in this repo attempts to redact better and inform users clearly about its limitations.
