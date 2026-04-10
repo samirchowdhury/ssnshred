@@ -1,0 +1,3 @@
+*.redacted.*
+*.pdf
+__pycache__/
