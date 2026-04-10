@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ssnshred — Redact SSNs from PDFs</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+  color: #1a1a1a;
+  line-height: 1.5;
+}
+h1 { font-size: 1.5rem; margin-bottom: 0.25rem; }
+.subtitle { color: #555; margin-bottom: 1.5rem; font-size: 0.95rem; }
+
+.section { margin-bottom: 1.25rem; }
+label { display: block; font-weight: 600; margin-bottom: 0.25rem; }
+.hint { color: #666; font-size: 0.85rem; margin-bottom: 0.5rem; }
+
+input[type="file"],
+input[type="text"] {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 1rem;
+}
+input[type="text"]:disabled { background: #f0f0f0; }
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.checkbox-row label { font-weight: normal; margin-bottom: 0; }
+
+button {
+  padding: 0.6rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  color: white;
+  background: #2563eb;
+}
+button:disabled { background: #94a3b8; cursor: not-allowed; }
+button:hover:not(:disabled) { background: #1d4ed8; }
+
+#status {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  display: none;
+}
+#status.info { display: block; background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+#status.success { display: block; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+#status.error { display: block; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+
+.privacy {
+  margin-top: 2rem;
+  padding: 1rem;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  color: #475569;
+}
+.privacy strong { color: #1a1a1a; }
+
+footer {
+  margin-top: 2rem;
+  font-size: 0.8rem;
+  color: #94a3b8;
+  text-align: center;
+}
+footer a { color: #64748b; }
+</style>
+</head>
+<body>
+
+<h1>ssnshred</h1>
+<p class="subtitle">Redact SSNs from tax PDFs. Everything runs in your browser — your file never leaves your computer.</p>
+
+<div class="section">
+  <label for="fileInput">PDF file</label>
+  <input type="file" id="fileInput" accept=".pdf,application/pdf">
+</div>
+
+<div class="section">
+  <label for="ssnInput">SSNs to redact</label>
+  <div class="hint">Enter one or more SSNs, separated by commas. Any format works (123-45-6789, 123456789, etc.)</div>
+  <input type="text" id="ssnInput" placeholder="123-45-6789, 987-65-4321" autocomplete="off" spellcheck="false">
+
+  <div class="checkbox-row">
+    <input type="checkbox" id="autoDetect">
+    <label for="autoDetect">Auto-detect SSN patterns (XXX-XX-XXXX)</label>
+  </div>
+</div>
+
+<div class="section">
+  <button id="redactBtn" disabled>Redact &amp; Download</button>
+</div>
+
+<div id="status"></div>
+
+<div class="privacy">
+  <strong>Privacy:</strong> This tool uses <a href="https://mupdf.com" target="_blank" rel="noopener">MuPDF</a> compiled to WebAssembly.
+  All processing happens locally in your browser. No data is uploaded to any server.
+  The original file is never modified — you download a new redacted copy.
+</div>
+
+<footer>
+  <a href="https://github.com/samirchowdhury/ssnshred" target="_blank" rel="noopener">ssnshred</a> — AGPL-3.0
+</footer>
+
+<script>
+"use strict";
+
+const fileInput = document.getElementById("fileInput");
+const ssnInput = document.getElementById("ssnInput");
+const autoDetect = document.getElementById("autoDetect");
+const redactBtn = document.getElementById("redactBtn");
+const statusEl = document.getElementById("status");
+
+let worker = null;
+let workerReady = false;
+let pendingResolve = null;
+
+function setStatus(msg, type) {
+  statusEl.textContent = msg;
+  statusEl.className = type;
+}
+
+function initWorker() {
+  worker = new Worker("worker.js", { type: "module" });
+  worker.onmessage = function (e) {
+    const [kind, payload] = e.data;
+    if (kind === "READY") {
+      workerReady = true;
+      updateButton();
+    } else if (kind === "PROGRESS") {
+      setStatus(payload, "info");
+    } else if (kind === "RESULT") {
+      if (pendingResolve) pendingResolve({ ok: true, data: payload });
+      pendingResolve = null;
+    } else if (kind === "ERROR") {
+      if (pendingResolve) pendingResolve({ ok: false, error: payload });
+      pendingResolve = null;
+    }
+  };
+  worker.onerror = function (e) {
+    setStatus("Worker failed to load. Your browser may not support WebAssembly.", "error");
+  };
+}
+
+function callWorker(msg) {
+  return new Promise(function (resolve) {
+    pendingResolve = resolve;
+    worker.postMessage(msg);
+  });
+}
+
+function updateButton() {
+  const hasFile = fileInput.files && fileInput.files.length > 0;
+  const hasInput = ssnInput.value.trim() !== "" || autoDetect.checked;
+  redactBtn.disabled = !(workerReady && hasFile && hasInput);
+}
+
+fileInput.addEventListener("change", updateButton);
+ssnInput.addEventListener("input", updateButton);
+autoDetect.addEventListener("change", function () {
+  updateButton();
+});
+
+redactBtn.addEventListener("click", async function () {
+  const file = fileInput.files[0];
+  if (!file) return;
+
+  redactBtn.disabled = true;
+  setStatus("Reading file...", "info");
+
+  const buffer = await file.arrayBuffer();
+  const numbers = ssnInput.value
+    .split(",")
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+  const auto = autoDetect.checked;
+
+  if (numbers.length === 0 && !auto) {
+    setStatus("Enter at least one SSN, or enable auto-detect.", "error");
+    updateButton();
+    return;
+  }
+
+  setStatus("Loading PDF engine...", "info");
+
+  const result = await callWorker({
+    action: "redact",
+    buffer: buffer,
+    numbers: numbers,
+    auto: auto,
+  });
+
+  if (!result.ok) {
+    setStatus("Error: " + result.error, "error");
+    updateButton();
+    return;
+  }
+
+  const count = result.data.count;
+  if (count === 0) {
+    setStatus("No matches found. Nothing to redact.", "info");
+    updateButton();
+    return;
+  }
+
+  // Trigger download
+  const blob = new Blob([result.data.pdf], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const baseName = file.name.replace(/\.pdf$/i, "");
+  a.href = url;
+  a.download = baseName + ".redacted.pdf";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  setStatus("Done! Redacted " + count + " match(es). File downloaded.", "success");
+  updateButton();
+});
+
+initWorker();
+</script>
+</body>
+</html>
