@@ -97,7 +97,9 @@ footer a { color: #64748b; }
 <body>
 
 <h1>ssnshred</h1>
-<p class="subtitle">Redact SSNs from tax PDFs. Everything runs in your browser. Your file never leaves your computer. Scanned or image-based PDFs are not supported.</p>
+<p class="subtitle">Redact SSNs from tax PDFs. Everything runs in your browser. Your file never leaves your computer.</p>
+<p>Scanned or image-based PDFs are not supported.</p>
+
 
 <div class="section">
   <label for="fileInput">PDF file</label>
@@ -138,7 +140,7 @@ It's a structured bundle of many different types of objects—text, images, font
 <h3>Five places SSNs can hide</h3>
 
 <h4>1. Page content streams (the visible text)</h4>
-<p>This is what we see when we open the PDF. Text is stored as low-level drawing commands like "move to position (72, 130) and draw the string '078-05-1120'." <code>apply_redactions()</code> handles this: it finds the drawing commands, removes them, and draws "REDACTED" instead.</p>
+<p>This is what we see when we open the PDF. Text is stored as low-level drawing commands like "move to position (72, 130) and draw the string '078-05-1120'." This case is handled by finding the drawing commands and removing them.</p>
 
 <h4>2. Metadata (document properties)</h4>
 <p>Every PDF has a properties panel (try File → Properties in any PDF viewer). It includes fields like Title, Author, Subject, and Keywords. Tax software sometimes stuffs SSNs into these fields — for example, titling a document "Tax Return - John Doe SSN 078-05-1120" for internal tracking. This metadata is stored separately from page content and must be scrubbed independently.</p>
